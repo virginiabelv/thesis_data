@@ -1,0 +1,633 @@
+---
+title: "RNAseq"
+author: "Virginia Belvedere"
+date: September 2025
+format: html
+editor: visual
+output: html_document
+self-contained: true
+toc: true
+toc-expand: 2
+toc_float: true
+toc-title: Contents
+toc-location: left
+number-sections: true
+number-depth: 3
+---
+
+# RNAseq data analysis for MSMEG_3117 CRISPRi strains - September 2025
+
+# Background / Relevant Information
+
+-   usegalaxy.eu history set up: [https://usegalaxy.eu/u/vbelv/h/msmeg-3117-analysis](#0)
+
+-   Preliminary workflow: <https://rvcac-my.sharepoint.com/:w:/r/personal/skendall_rvc_ac_uk/_layouts/15/Doc.aspx?sourcedoc=%7Bbdc71589-9d04-4cf4-a935-1433f79654f4%7D&action=edit&wdPid=2dcbb173>
+
+-   Relevant pipelines:
+
+    > <https://rvcac-my.sharepoint.com/shared?id=%2Fpersonal%2Fskendall%5Frvc%5Fac%5Fuk%2FDocuments%2FRVC%20PhD%20students%202024%5F2028%2FiCASE%20PhD%20Virginia%2FThesis%20submitted%2Epdf&listurl=%2Fpersonal%2Fskendall%5Frvc%5Fac%5Fuk%2FDocuments&parentview=3>
+    >
+    > > page 152
+    >
+    > <file:///Users/virginiabelvedere/Library/Containers/com.microsoft.Outlook/Data/tmp/Outlook%20Temp/Part1_Preliminary_Analysis_RNAseq_Viktor_Sep2025.html>
+
+# Data Download
+
+Link to data provided by Azenta Genewiz via sFTP server - downloaded with CyberDuck to local server (Macintosh/Users/virginiabelvedere).
+
+Download guide: <https://web.genewiz.com/hubfs/2024-06%20GEN%20NGS%20-%20sFTP%20Data%20Download%20Guide%20UK/13012-M&G-UK%200624%20sFTP%20Data%20Download%20Guide.pdf>
+
+-   Project Code: 40-1124332264
+
+-   Host: <sftp://ngsuksftp.azenta.com>
+
+-   User: vbelvedere24_rvc
+
+-   Password: /
+
+-   Port: 22
+
+All files come in the format .fastq.gz (complete fastq file) and .fastq.gz.md5 (a sanity check file for complete download - can be run through R to check the completeness of the download locally, in case anything was missed in the unzipping and downloading across servers).
+
+Saved under "00_fastq" locally and in shared drive: [00_fastq](https://rvcac-my.sharepoint.com/:f:/g/personal/skendall_rvc_ac_uk/ErutMmlCWV1Dhw0eEmD3AdcBNyDnKhVwDHQBTtyvASZwyw?e=ZxatOF)
+
+Uploaded directly to usegalaxy.eu via "Upload - choose local file". All files uploaded as ".fastqsanger.gz" and left under 'unspecified' build. Note it takes a long time for the files to upload (\~10 mins per file) and they are very large (approx. 6GB).
+
+All files uploaded into one history for ease of access/time limitation due to large size taking ages to upload (rather than merging further down the line, as they need to be run together for MULTIQC, featureCounts, etc).
+
+# Paired End Reading
+
+All files titled as described in sample template when sent for sequencing; e.g., BR1-sgRNA-A_R1_001.fastq.gz, BR1-sgRNA-A_R2_001.fastq.gz
+
+"R1" and "R2" reference paired end read files; R1 = sense and R2 = antisense.
+
+These files can be paired by Galaxy for easier downstream work.
+
+1.  Select files with same condition/induction, correct biological replicate allocation and R1/R2 nomenclature.
+
+    > e.g., BR1-sgRNA-A_R1_001.fastq.gz + BR1-sgRNA-A_R2_001.fastq.gz
+
+2.  Select "Advanced build list"
+
+3.  Select "List of paired datasets"
+
+4.  Auto-pairing should already have \_R1 and \_R2 loaded as filters for pairing; if it doesn't, they are not the right pairs/do not match!
+
+5.  Check status is green (ready to pair), name the paired datasets as the original condition/induction and biological replicate, and build dataset.
+
+    > Complete for all 9 samples.
+    >
+    > Output:
+    >
+    > ![](images/clipboard-3180849486.png){width="77"}
+
+# Quality Control (Raw) - Falco + MultiQC
+
+Run all raw paired files through Falco (updated version of FASTQC) under default parameters.
+
+*(The output .txt files from all individual files can be run into one large QC file via MultiQC - not rly relevant here as no filtering done yet, but may be useful for showing data to others)*
+
+> No contaminant list, adapter list, or submodule/limit specifying file (no filters put in yet)
+>
+> Output: [Raw](https://rvcac-my.sharepoint.com/:f:/g/personal/skendall_rvc_ac_uk/EqcWvnlfeH9EnxRf2RsRaSQBy09Udyh32CaMOIzhHFs8Nw?e=zed6iN)
+
+# Adapter Trimming and Read Filtering - fastp
+
+Low quality bases and short reads can reduce mapping accuracy: fastp has filters which allows reads with poor base quality ('low confidence calls') to be removed
+
+> This can be more stringent or lenient depending on what you want to look at in your data.
+>
+> As I am looking at global effects, I don't want to filter too much.
+
+1.  Run paired-end reads (paired datasets from 'Download data') on fastp
+
+2.  All parameters default unless specified below:
+
+    > Filter_options: quality_filtering_options –\> Qualified Quality phred: 30
+    >
+    > Filter_options: length_filtering_options –\> Minimum length required: 50
+    >
+    > Read_mod_options: PolyG tail trimming –\> enabled
+    >
+    > Read_mod_options: PolyX tail trimming –\> enabled (automatic)
+
+Output:
+
+> .JSON & .html summary files
+>
+> > [fastp](https://rvcac-my.sharepoint.com/:f:/g/personal/skendall_rvc_ac_uk/ElcYHX7aZtNLi7875JkuGj4BGWsU4La0cRQ2F4vAM19m7A?e=B5gET3)
+>
+> paired dataset output (.fastqsanger.gz)
+>
+> > ![](images/clipboard-542549170.png){width="103"}
+
+# Quality Control (Filtered) - Falco + MultiQC
+
+Run all fastp-filtered paired files through Falco (updated version of FASTQC) under default parameters.
+
+> Output: [Filtered](https://rvcac-my.sharepoint.com/:f:/g/personal/skendall_rvc_ac_uk/EjLFwR6gs41Fmu7RDUgw6FcBId2EI4metxduS5cM426G1w?e=qcdTjI)
+
+The output .txt files from all individual files can be run into one large QC file via MultiQC - [MultiQC_on_FASTP_DATA_html.html](https://rvcac-my.sharepoint.com/:u:/g/personal/skendall_rvc_ac_uk/EaUEIe2ewe5Kk8F8IOD5Zp8Bz3nB03lkrgW0LoY9UgiB3g?e=pBAQ6a)
+
+# Mapping reads to the reference genome - bwa-mem
+
+bwa-mem – popular aligner for short reads (\~150bp), paired end reads, and moderate sized genomes (M. smegmatis \~4.4Mb), and default parameters are good for PE150 RNAseq work 
+
+## Download and Index the reference genome
+
+Latest version of Mycobacterium smegmatis Mc^2^155: <https://www.ncbi.nlm.nih.gov/nuccore/CP000480.1?report=fasta&from=3192794&to=3192816>
+
+To download .fasta (sequence) and .gtf (annotation): <https://www.ncbi.nlm.nih.gov/datasets/genome/GCF_000015005.1/>
+
+Saved under 'CP000480_1' locally: /Users/virginiabelvedere/Downloads/CP000480_1/ncbi_dataset
+
+Upload .fasta and .gff to Galaxy history containing paired read files.
+
+> ![](images/clipboard-2526316325.png){width="77"}
+
+Reference is automatically indexed when run with bwa-mem (.fai file made).
+
+## Download and Index the plasmid sequence (pLJR962)
+
+As the reference genome does not contain the plasmid which holds the sgRNA scaffold, dCas9 and other sequence elements, mapping would not show whether or not the dCas9 is a) present or b) active, as these reads do not map to the reference as they have been genetically modified into the wildtype.
+
+Therefore, extra step needed to map to this sequence.
+
+SK provided the plasmid sequence: /Users/virginiabelvedere/Desktop/LIDo/PhD/Transcriptomics/pLJR962.dna
+
+Open with SnapGene free to visualise location of:
+
+> 1.  Sth1 dCas9 sequence
+>
+> > ![](images/clipboard-3006327411.png){width="358"}
+> >
+> > > dCas9 sequence: [dCAS9 sequence.docx](https://rvcac-my.sharepoint.com/:w:/g/personal/skendall_rvc_ac_uk/EWPfX1fAPOdBqSBGXDHTNEwBFKmWtoIMNR6L1yf6MzZo_g?e=ywogGj)
+> >
+> > 2.  Sth1 sgRNA scaffold + Golden Gate handle
+> >
+> > ![](images/clipboard-2727014703.png){width="365"}
+> >
+> > ![](images/clipboard-2179998578.png){width="367"}
+> >
+> > > sgRNA scaffold sequence: **ggcaacagatcgaccagccg**gttttagagctgtgaaaacagcgagttaaaataaggcttagtccgtactcaacttgaaaaggtggcaccgattcggtgtttt 
+> > >
+> > > > BOLD – this is complementary to the MSM genome and hybridises to the complementary region (see Vals thesis figure 4.10.
+> > > >
+> > > > NON-BOLD – this sequence is the dcas9 “golden gate handle” and also there is a transcriptional terminator in the blue region. The handle region attracts the dCAS9 protein (when it is translated).
+> > > >
+> > > > The yellow region is expected to map to the genome but the blue region won’t.
+
+These visualisations can also be done in linear under "Sequence"
+
+> e.g., Sth1 dCas9
+>
+> ![](images/clipboard-617392072.png)
+>
+> e.g., Sth1 sgRNA scaffold
+>
+> ![](images/clipboard-1840196588.png)
+
+This provides information on the loci of the genes within the plasmid, aiding visualisations in IGV in order to locate the reads mapping to these core regions of the plasmid.
+
+This sequence can be exported as a .fasta and .gff annotation for use with mapping in Galaxy.
+
+> ![](images/clipboard-931853179.png)
+
+Exported and saved as FASTA FILE: /Users/virginiabelvedere/Desktop/LIDo/PhD/Transcriptomics/pLJR962.ape.fa
+
+> ![](images/clipboard-976362277.png){width="327"}
+
+Exported and saved as GenBank file (to convert to annotation file .gtf/.gff manually in Galaxy through "edit attributes" when uploading): /Users/virginiabelvedere/Desktop/LIDo/PhD/Transcriptomics/pLJR962.gbk
+
+> ![](images/clipboard-2941343874.png){width="326"}
+
+.pLJR962.ape.fa and .pLJR962.gbk (converted to .gtf/.gff) to Galaxy history containing paired read files and Mc^2^155 reference genome.
+
+Reference is automatically indexed when run with bwa-mem (.fai file made).
+
+## Concatenate reference and plasmid genome files and annotations.
+
+In order to use both the Mc^2^155 and plasmid genomes as a reference for mapping, the sequences must be merged (concatenated).
+
+> This can be done experimentally through gDNA extraction and sequencing of the sgRNA-ve and sgRNA+ve CRISPRi strains, and the contigs can be assembled to have a true representation of the genomes.
+
+> > Completed October 2025 - [JZNKQ4_results](https://rvcac-my.sharepoint.com/:f:/g/personal/skendall_rvc_ac_uk/EoAMOKIjZZBNsbhL4neVNqUBDOhNEMSchHFGzAKgLrKIXw?e=MKXIMu) - with PCR validation of dCAS9 ([sgRNA+ve PCR practice.jpg](https://rvcac-my.sharepoint.com/:i:/g/personal/skendall_rvc_ac_uk/EW2uUTTTXuNNiWwtlea8iQsBZJkybwQ97F_MX_rdZyFT3Q?e=7IThzY))
+
+Used the 'concatenate datasets - tail-to-head' tool in Galaxy to merge the .fasta files and .gtf annotations for both Mc^2^155 and plasmid.
+
+> ![](images/clipboard-881217344.png){width="320"}
+>
+> ![](images/clipboard-2165759218.png){width="313"}
+
+> This does not accurately integrated the plasmid into the reference genome, as it should be in the CRISPRi strain.
+>
+> Rather, it adds the plasmid .fasta sequence to the start/end of the file - so while its not a real representation of where the plasmid is located and where the reads would actually map in the genome, it still shows whether or not the reads from the samples actually map to the plasmid, which is what needs to be seen to confirm the dCas9 is being transcribed and sgRNA is present in the relevant strains/conditions it should be.
+>
+> > Counts/reads + location specificity of the plasmid is not necessary for downstream analysis (differential expression), as I am counting the MSMEG_3117 gene, not the sgRNA or dCas9.
+> >
+> > Just a useful sanity check to see if the dCas9/CRISPRi machinery is working.
+
+Output:
+
+> ![](images/clipboard-2360828586.png){width="199"}
+
+## Map reads to the reference
+
+In order to map the sample reads to the concatenated reference genome, I used bwa-mem in Galaxy ("Map with BWA-MEM")
+
+All parameters default other than:
+
+1.  **Will you select a reference genome from your history or use a built-in index?**Use a genome from history and build index
+
+    > ![](images/clipboard-1860523023.png){width="300"}
+
+2.  **Single or Paired-end reads**
+
+    Paired collection (fastp-filtered)
+
+    > ![](images/clipboard-648789870.png){width="295"}
+
+Run for all paired collections.
+
+Output: .bam dataset for paired collection
+
+> ![](images/clipboard-705555244.png)
+
+## Visualising Data in IGV
+
+These bam files can be loaded into IGV with the concatenated reference genome (Mc^2^155 and plasmid) sequence and annotations to visualise the reads mapping.
+
+1.  Ensure IGV is downloaded and open with a new session already.
+
+2.  Select the concatenated fasta file for the reference (Mc^2^155 and plasmid), select 'visualize' –\> "1. Display with IGV (local)
+
+    > this needs to be done before displaying the bam files or they won't visualise.
+
+3.  Select a .bam file and view.
+
+4.  Select 'visualize' –\> "1. Display with IGV (local).
+
+5.  .bam file should load in automatically as a track + with combined coverage of reads per gene (mapping against the annotation of the reference or plasmid)
+
+Mc^2^155 and plasmid concatenation appears as two separate genome tracks in IGV, but can be changed to view each individually against the reads uploaded
+
+To view mapping with Mc^2^155:
+
+> ![](images/clipboard-2453029064.png)
+>
+> yellow bar: location of 20bp sgRNA region targeting MSMEG_3117
+>
+> > Tools –\> Find Motif -\> Insert text of sequence of interest to map as a separate track in IGV to find it more easily when looking at the reads (can be chaotic at first glance without this)
+
+To view mapping with pLJR962 plasmid:
+
+> ![](images/clipboard-3458570157.png)
+>
+> blue bar: location of dCas9
+>
+> > Tools –\> Find Motif -\> Insert text of sequence of interest to map as a separate track in IGV to find it more easily when looking at the reads (can be chaotic at first glance without this)
+
+Mess around looking at each biological replicate together, or the different conditions together, to compare.
+
+Should see:
+
+> 1.  mapping with Mc^2^155: sgRNA+ve +ATc has lower coverage than sgRNA-ve +ATc and sgRNA+ve -ATc, as action of sgRNA+ve has been induced, and the outcome should be the silencing of MSMEG_3117 (i.e. less reads)
+>
+> 2.  mapping with pLJR962 plasmid: sgRNA-ve and sgRNA+ve with ATc induction should have a peak in coverage at the dCas9 region, as the machinery has been induced
+>
+>     > sgRNA scaffold mapping was low for all reads - likely due to the scaffold changing its secondary structure/conformation when integrated into Mc^2^155 genome, making it harder for reads to map.
+>     >
+>     > Indication of high dCas9 presence is enough to believe it is working (alongside PCR validation from myself and from Val previously).
+>     >
+>     > Main point is the coverage at MSMEG_3117.
+
+BR1 and BR2 followed the above assumptions, while BR3 did not:
+
+> BR1:
+>
+> > ![](images/clipboard-865160716.png)
+>
+> BR2:
+>
+> > ![](images/clipboard-2669571052.png)
+>
+> BR3:
+>
+> > ![](images/clipboard-2676856268.png)
+> >
+> > both sgRNA+ve and sgRNA+ve +ATc had low read counts at MSMEG_3117.
+>
+> ![](images/clipboard-2144566033.png)
+>
+> > both sgRNA+ve and sgRNA+ve +ATc had high dCas9 counts, and sgRNA-ve +ATc had lower dCas9 counts.
+
+[**Differences in visualisation/mapping of biological replicates to be dealt with when considering batch effects/power further downstream in analysis (DESeq2, PCAtools, etc.).**]{.underline}
+
+# Counting reads - featureCounts
+
+featureCounts is an automated tool to quantitatively assign and count raw reads from the .bam file to genes from annotation file (Mc^2^155 or pLJR962 - though latter less relevant).
+
+All parameters from featureCounts stated/changed as follows:
+
+> 1.  Alignment file: BAM file for PE bwa-mem aligned reads
+>
+> 2.  Specify strand information: stranded (reverse)
+>
+>     > dUTP method of library preparation means mRNA strand is coded on the first cDNA strand created, which is originally a template of the antisense strand to the mRNA, meaning the data is 'reverse stranded'
+>     >
+>     > > took me a week to comprehend this - validated by use in Irilenia's pipeline and looking at Genewiz method of library preparation during sequencing with them.
+>
+> 3.  Gene annotation file:
+>
+>     Concatenated data on CP000480.1 and pLJR962 .gtf files
+>
+> 4.  GFF feature type filter: CDS
+>
+> 5.  GFF gene identifier: gene_id / locus_tag
+>
+> 6.  On feature level: no
+>
+> 7.  Output format: default
+>
+> 8.  Create gene-length file: no
+>
+> 9.  Does the input have read pairs: Yes, paired-end and count them as one single fragment
+>
+> 10. Check paired-end distance: no
+>
+> 11. Only allow fragments with both reads aligned: yes
+>
+> 12. Exclude chimeric fragments: yes
+>
+> 13. Read filtering options + advanced options: default
+
+Output:
+
+> raw counts
+>
+> > collated important counts (MSMEG_3117 and dCas9 counts)
+> >
+> > ![](images/clipboard-4176667349.png)
+> >
+> > BR1 and BR2 have the following trends in reads:
+> >
+> > 1.  sgRNA+ve +ATc has lower MSMEG_3117 counts than sgRNA-ve +ATc and sgRNA+ve -ATc, as action of sgRNA+ve has been induced, and the outcome should be the silencing of MSMEG_3117 (i.e. less reads)
+> > 2.  sgRNA-ve and sgRNA+ve with ATc induction have higher dCas9 counts, as the machinery has been induced
+> >
+> > BR3 does not follow this (see Visualising Data with IGV)
+>
+> summary - [featureCounts Summary](https://rvcac-my.sharepoint.com/:f:/g/personal/skendall_rvc_ac_uk/Enna-mG4GetBsdLpba8Vt0EBf8Qw856LlI9-V-nF_j-YWg?e=PFT6X7)
+
+# Differential Expression Analysis (raw) - DESeq2
+
+DESeq2 is a statistical method used to find differentially expressed genes (DEGs) from counts data (i.e., read counts from featureCounts tool for RNAseq data).
+
+Main parameters for Galaxy's DESeq2:
+
+1.  "how":
+
+    **"select datasets per level"**: manually assign datasets (counts files) that belong to each experimental level
+
+-   i.e., level 1 (control - sgRNA-ve +ATc) , level 2 (control - sgRNA+ve -ATc), level 3 (test - sgRNA+ve +ATc)
+
+-   [this is what I used]{.underline}
+
+    **"select group tags corresponding to levels"**: use dataset collections that already have group tags/labels indicating which samples belong to each condition (used when a dataset collection is made in galaxy)
+
+-   i.e., counts files are grouped into control and test groups - e.g., BR1, BR2 and BR3 sgRNA-ve +ATc grouped into one collection named "sgRNA-ve +ATc" (and same for other two condition types)
+
+2.  "Factor: Factor Name" - the experimental variable (e.g., treatment, condition) whose effect you want to test
+
+-   e.g., condition (induction with ATc/sgRNA) - defines samples to be grouped by sgRNA+/- AND ATc+/- for DE analysis [(this is what I used)]{.underline}
+
+3.  "Factor: Factor Levels" - the categories within the factor (above)
+
+-   i.e., control and induced ([this is what I used)]{.underline}
+
+-   level 1 - sgRNA-ve +ATc
+
+-   level 2 - sgRNA+ve +ATc
+
+-   level 3 - sgRNA+ve -ATc
+
+4.  "optional batch effects/factors (in tabular file) to include in model" - [i did not run this at this first point (raw data only)]{.underline}
+
+-   Batch effect: a non-biological difference between samples that systematically affects the expression (e.g., different sequencing runs, technical replicate differences, RNA extraction day)
+
+I ran three DESeq2 models:
+
+1.  All BRs with three levels: 1) sgRNA-ve +ATc, 2) sgRNA+ve +ATc, 3) sgRNA+ve +ATc
+2.  all BRs with two levels: 1) sgRNA-ve +ATc, 2) sgRNA+ve +ATc
+3.  BR 1 and 2 with two levels: 1) sgRNA-ve +ATc, 2) sgRNA+ve +ATc
+
+E.g., For my data, I focused on DESeq2 model 2 - sgRNA-ve +ATc (control) vs sgRNA+ve +ATc (test) - as sgRNA+ve -ATc counts showed that the ATc was producing almost all of the induction counts, and sgRNA+ve alone produced some leaky induction without the presence of ATc, but this is negligible. Therefore, the best control to use for downstream analysis is the sgRNA-ve with ATc induction, to fully compare the relevance of the sgRNA+ve silencing on MSMEG_3117.
+
+DESeq2 outputs:
+
+-   Generate plots for visualizing the analysis results
+
+E.g., PCA and heatmap plots for model 2 were provided by Galaxy automatically.
+
+I then ran the data through R studio to produce a PCA plot with PCs 1 + 2 and 3 + 4 to look at variance (\~94% of variance from these 4 prinicpal components)
+
+```{r}
+# Packages
+suppressPackageStartupMessages({
+  library(ggplot2)
+})
+if (!requireNamespace("patchwork", quietly = TRUE)) {
+  install.packages("patchwork", repos = "https://cloud.r-project.org")
+}
+library(patchwork)
+
+# 1) Bring in the Galaxy rlog-normalised counts table
+rlog_df <- `Galaxy318.[rLog.Normalized.counts.file.on.sgrna._+.ATC._+.(ALL.BRs)]`
+
+
+# Make rownames from the first column (deduplicate safely)
+genes_raw <- rlog_df[[gene_col]]
+genes_fix <- make.unique(as.character(genes_raw), sep = "_dup")
+rlog_df[[gene_col]] <- genes_fix
+rownames(rlog_df) <- rlog_df[[gene_col]]
+
+# Keep only numeric sample columns
+rlog_df <- rlog_df[, -gene_col, drop = FALSE]
+# Force numeric (your table is already numeric; this guards against factors/chr)
+rlog_mat <- as.matrix(sapply(rlog_df, function(x) as.numeric(x)))
+rownames(rlog_mat) <- rownames(rlog_df)
+
+# 2) Filter zero-variance genes
+row_vars <- apply(rlog_mat, 1, var, na.rm = TRUE)
+keep <- is.finite(row_vars) & row_vars > 0
+rlog_mat_f <- rlog_mat[keep, , drop = FALSE]
+
+# 3) PCA
+pca <- prcomp(t(rlog_mat_f), center = TRUE, scale. = FALSE)
+percentVar <- (pca$sdev^2) / sum(pca$sdev^2) * 100
+
+# 4) Build sample data (condition + replicate)
+samples <- rownames(pca$x)
+samps_l <- tolower(samples)
+
+has_pos <- grepl("\\.sgrna\\.a(\\.|_)", samps_l)   # ".sgRNA.A." or ".sgRNA.A_"
+has_neg <- grepl("\\.sgrna\\.ve(\\.|_)", samps_l)  # ".sgRNA.ve." or ".sgRNA.ve_"
+has_atc <- grepl("\\.atc", samps_l)                # contains ".ATc"/".ATC"
+
+condition <- ifelse(has_neg & has_atc, "sgRNAneg_ATcpos",
+             ifelse(has_pos & has_atc, "sgRNApos_ATcpos",
+             ifelse(has_pos & !has_atc, "sgRNApos_ATcneg", NA_character_)))
+condition <- factor(condition,
+                    levels = c("sgRNApos_ATcneg","sgRNApos_ATcpos","sgRNAneg_ATcpos"))
+
+replicate <- factor(sub("^((BR)[0-9]+).*", "\\1", samples),
+                    levels = c("BR1","BR2","BR3"))
+
+stopifnot(!any(is.na(condition)))  # will error if parsing failed
+
+# 5) PCA data frame
+df_pca <- data.frame(pca$x[, 1:6],
+                     sample    = samples,
+                     condition = condition,
+                     replicate = replicate,
+                     check.names = FALSE)
+
+# 6) Plot pair
+plot_pc_pair <- function(df, pcx, pcy, pv) {
+  ggplot(df, aes(x = .data[[pcx]], y = .data[[pcy]],
+                 color = condition, shape = replicate, label = sample)) +
+    geom_point(size = 3) +
+    geom_text(vjust = 1.6, size = 3, show.legend = FALSE) +
+    theme_classic(base_size = 12) +
+    # optional custom palette (close to your previous plot)
+    scale_color_manual(values = c("#E64B35", "#4DBBD5", "#00A087")) +
+    labs(
+      x = sprintf("%s: %.1f%% variance", pcx, pv[as.integer(sub("PC","", pcx))]),
+      y = sprintf("%s: %.1f%% variance", pcy, pv[as.integer(sub("PC","", pcy))]),
+      color = "group",
+      shape = "replicate"
+    )
+}
+
+# 7) Make PC1–PC2 and PC3–PC4 panels and show/save -----------------
+p12 <- plot_pc_pair(df_pca, "PC1", "PC2", percentVar)
+p34 <- plot_pc_pair(df_pca, "PC3", "PC4", percentVar)
+
+p12 + p34 + plot_annotation(
+  title = sprintf("PCA of rlog/VST counts — Top PCs (total shown: %.1f%%)",
+                  sum(percentVar[1:4]))
+)
+pca_percentVar <- percentVar
+pca_scores     <- df_pca
+
+
+```
+
+PC1: 52.95% variance
+
+PC2: 23.56% variance
+
+PC3: 13.3% variance
+
+PC4: 4.5% variance
+
+I also ran an individual PCA for each (a 'diagnostic check' multi-plot) to show each PC with its own x-axis (condition) and y-axis (PCA score)
+
+```{r}
+
+suppressPackageStartupMessages({
+  library(ggplot2)
+  library(dplyr)
+  library(tidyr)
+})
+
+samples   <- rownames(pca$x)
+samps_l   <- tolower(samples)
+has_pos   <- grepl("\\.sgrna\\.a(\\.|_)",  samps_l)  # sgRNA.A
+has_neg   <- grepl("\\.sgrna\\.ve(\\.|_)", samps_l)  # sgRNA.ve
+has_atc   <- grepl("\\.atc",              samps_l)  # ATc present
+
+condition <- ifelse(has_neg & has_atc, "sgRNAneg_ATcpos",
+             ifelse(has_pos & has_atc, "sgRNApos_ATcpos",
+             ifelse(has_pos & !has_atc, "sgRNApos_ATcneg", NA_character_)))
+condition <- factor(condition,
+                    levels = c("sgRNApos_ATcneg","sgRNApos_ATcpos","sgRNAneg_ATcpos"))
+
+replicate <- factor(sub("^((BR)[0-9]+).*", "\\1", samples),
+                    levels = c("BR1","BR2","BR3"))
+
+stopifnot(!any(is.na(condition)))  # sanity check
+
+# 1) Dataframe for PCA scores
+pc_names <- paste0("PC", 1:6)
+df_pca <- data.frame(pca$x[, pc_names, drop = FALSE],
+                     sample = samples,
+                     condition = condition,
+                     replicate = replicate,
+                     check.names = FALSE)
+
+# 2) Correlation of each PC with condition/replicate (numeric)
+cond_num <- as.numeric(df_pca$condition)
+rep_num  <- as.numeric(df_pca$replicate)
+
+cors <- data.frame(
+  PC              = pc_names,
+  corr_condition  = sapply(df_pca[, pc_names, drop = FALSE],
+                           function(pc) cor(pc, cond_num)),
+  corr_replicate  = sapply(df_pca[, pc_names, drop = FALSE],
+                           function(pc) cor(pc, rep_num))
+)
+print(round(cors, 3))
+
+# 3) Plotting PCs
+df_pca_long <- df_pca %>%
+  select(sample, condition, replicate, starts_with("PC")) %>%
+  pivot_longer(cols = starts_with("PC"),
+               names_to = "PC",
+               values_to = "score") %>%
+  filter(PC %in% paste0("PC", 1:4))
+
+# Multiplot for PCs
+ggplot(df_pca_long,
+       aes(x = condition, y = score, color = condition, shape = replicate)) +
+  geom_hline(yintercept = 0, linetype = 3, linewidth = 0.3, alpha = 0.6) +
+  geom_jitter(width = 0.15, size = 3) +
+  facet_wrap(~ PC, scales = "free_y") +
+  theme_classic(base_size = 12) +
+  scale_color_manual(values = c("#E64B35", "#4DBBD5", "#00A087")) +
+  labs(title = "Diagnostic check: Are any PCs aligned with hidden factors?",
+       x = "Condition", y = "PC score", color = "group", shape = "replicate")
+
+
+```
+
+The clustering data, when compared to model 3, which did not include BR3 (a potential replication error/major outlier), showed quite drastically that replication was affecting clustering (likely PC2). Therefore, adding biological replicate as a batch factor in the DESeq2 model is vital to confirm whether or not data from all replicates can be taken forward for downstream analysis, or whether BR3 is having too much of an effect (and needs to be accounted for by removing and re-extracting a new replicate).
+
+This batch factor was added using limma in R.
+
+-   Output sample size factors
+
+-   Output normalised counts
+
+-   Output VST normalized table
+
+-   Output rLog normalized table
+
+-   Output all levels vs all levels of primary factor (use when you have \>2 levels for primary factor) - provides pairwise contrasts (two BRs compared)
+
+E.g., BR1,2,3 pairwise contrast (important) values from sgRNA-ve +ATc (control) vs sgRNA+ve +ATc (test) for MSMEG_3117:
+
+-   log2FC: 6.6816 (number one DEG)
+
+    [MSMEG_3117 is \~103x more expressed in sgRNA-ve +ATc than sgRNA+ve +ATc]{.underline}
+
+    [positive value means higher expression in sgRNA-ve +ATc]{.underline}
+
+-   standard error for log2FC: 0.731 (smaller SE = higher precision)
+
+-   p-value for statistical significance of log2FC: 6.07e-20
+
+-   p-value adjusted (false discovery rate - FDR): 4.03e-16
+
+    [p-value (raw and adjusted) \<0.05: MSMEG_3117 is a statistically significant DEG]{.underline}
+
+# Correcting for batch factors - limma (R)
