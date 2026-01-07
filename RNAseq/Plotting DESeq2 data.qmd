@@ -1,4 +1,19 @@
-
+---
+title: "Plotting DESeq2 Data"
+author: "Virginia Belvedere"
+date: "September 2025"
+format: html
+editor: visual
+output: html_document
+self-contained: true
+toc: true
+toc-expand: 2
+toc_float: true
+toc-title: Contents
+toc-location: left
+number-sections: true
+number-depth: 3
+---
 ```
 
 ## Plots
