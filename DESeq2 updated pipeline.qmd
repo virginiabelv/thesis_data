@@ -1,0 +1,833 @@
+---
+title: "BR3 pipeline DeSeq2"
+format: html
+---
+
+```{r}
+suppressPackageStartupMessages({
+  library(DESeq2)
+  library(ggplot2)
+  library(ggrepel)
+  library(pheatmap)
+  library(matrixStats)
+  library(limma)
+  library(goseq)
+})
+
+# Output dirs
+out_base <- file.path("RNAseq_project", "BR123_ATC")
+dir.create(out_base, recursive = TRUE, showWarnings = FALSE)
+
+out_tables <- file.path(out_base, "tables")
+out_plots  <- file.path(out_base, "plots")
+out_goseq  <- file.path(out_base, "goseq")
+dir.create(out_tables, recursive = TRUE, showWarnings = FALSE)
+dir.create(out_plots,  recursive = TRUE, showWarnings = FALSE)
+dir.create(out_goseq,  recursive = TRUE, showWarnings = FALSE)
+
+```
+
+## Saving Counts from Counts Matrix
+
+To save a table of specific counts from your target gene within the counts matrix, rather than sifting through all the genes and samples:
+
+```{r}
+
+CountsMatrix1 <- read.csv("~/Desktop/LIDo/PhD/RNAseq_project/BR3/CountsMatrix_real.csv")
+View(CountsMatrix1)
+library(DESeq2)
+counts <- CountsMatrix1   # change if needed
+
+# Put gene IDs into rownames if needed
+if (!is.null(colnames(counts)) && colnames(counts)[1] %in% c("Gene","gene","gene_id","X")) {
+     rownames(counts) <- make.unique(as.character(counts[[1]]))
+     counts[[1]] <- NULL
+}
+counts <- as.matrix(counts)
+storage.mode(counts) <- "numeric"
+# Extract MSMEG_3117 counts
+stopifnot("MSMEG_3117" %in% rownames(counts))
+msmeg3117_counts <- counts["MSMEG_3117", ]
+# Build tidy table
+msmeg3117_table <- data.frame(
+     gene_id   = "MSMEG_3117",
+     sample    = colnames(counts),
+     counts    = as.numeric(msmeg3117_counts),
+     row.names = NULL,
+     check.names = FALSE)
+
+msmeg3117_table
+
+write.csv(
+     msmeg3117_table,
+     "MSMEG_3117_raw_counts_by_sample.csv",
+     row.names = FALSE
+)
+```
+
+## Load Counts Matrix (from featureCounts data) - (optional) preliminary run in DESeq2
+
+The **counts matrix** must be created from each individual featureCounts file in Galaxy, including the gene id names as the first column/title for each row. This can be done in many ways - I did this manually in excel and exported the table as a .csv and uploaded to R studio (i.e., CountsMatrix1 for all BRs). This code also hinges in the presence of *coldata*, a data table containing the sample names and conditions/replicate specifications, e.g.,:
+
+|                      | sample           | condition       | replicate |
+|:---------------------|:-----------------|:----------------|:----------|
+| **BR3_sgRNAneg_ATc** | BR3_sgRNAneg_ATc | sgRNAneg_ATcpos | BR3       |
+| **BR3_sgRNApos**     | BR3_sgRNApos     | sgRNApos_ATcneg | BR3       |
+| **BR3_sgRNApos_ATc** | BR3_sgRNApos_ATc | sgRNApos_ATcpos | BR3       |
+| **BR1_sgRNAneg_ATc** | BR1_sgRNAneg_ATc | sgRNAneg_ATcpos | BR1       |
+| **BR1_sgRNApos**     | BR1_sgRNApos     | sgRNApos_ATcneg | BR1       |
+| **BR1_sgRNApos_ATc** | BR1_sgRNApos_ATc | sgRNApos_ATcpos | BR1       |
+| **BR2_sgRNAneg_ATc** | BR2_sgRNAneg_ATc | sgRNAneg_ATcpos | BR2       |
+| **BR2_sgRNApos**     | BR2_sgRNApos     | sgRNApos_ATcneg | BR2       |
+| **BR2_sgRNApos_ATc** | BR2_sgRNApos_ATc | sgRNApos_ATcpos | BR2       |
+
+```{r}
+# Build coldata directly from count matrix
+samples <- colnames(count_mat)
+samps_l <- tolower(samples)
+replicate <- factor(sub("^((br)[0-9]+).*", "\\\\1", samps_l),
+                     levels = c("br1","br2","br3"))
+
+has_atc <- grepl("atc", samps_l)
+has_pos <- grepl("sgrnapos|sgrna\\\\+|sgrna\\\\.a", samps_l)
+has_neg <- grepl("sgrnaneg|sgrna\\\\-|sgrna\\\\.ve", samps_l)
+
+condition <- ifelse(has_neg & has_atc, "sgRNAneg_ATc",
+              ifelse(has_pos & !has_atc, "sgRNApos",
+              ifelse(has_pos & has_atc, "sgRNApos_ATc", NA_character_)))
+ 
+
+condition <- factor(condition, levels = c("sgRNAneg_ATc","sgRNApos","sgRNApos_ATc"))
+
+coldata <- data.frame(
+   sample = samples,
+   condition = condition,
+   replicate = replicate,
+   row.names = samples
+)
+
+# Format the counts matrix - put gene IDs into rownames, drop the Gene column, keep only numeric sample columns
+count_df <- CountsMatrix1
+rownames(count_df) <- count_df$Gene
+count_df$Gene <- NULL
+
+# Convert to matrix + integer counts
+count_mat <- as.matrix(count_df)
+storage.mode(count_mat) <- "numeric"   # guards against characters
+count_mat <- round(count_mat)
+
+# 3) Make sure columns match coldata rows (same samples, same order)
+count_mat <- count_mat[, rownames(coldata), drop = FALSE]
+
+
+# 4) Subset to ATc+-only two-level comparison
+
+# As I am only comparing sgRNAneg and sgRNApos +ATC, I only need to run these in the DESeq2 model, as sgRNApos' counts may affect the estimations of the model, even though it is not being counted in the output comparison, the model will still technically be three-levels instead of the two-level we want. Though both are valid methods, the three-level modelwill affect how many genes pass the FDR/padj and may skew top DEGs.
+  
+# Keep ATc+ only (6 samples)
+keep_cols <- colnames(count_mat)[
+  grepl("^BR[123]_sgRNAneg_ATc$", colnames(count_mat)) |
+  grepl("^BR[123]_sgRNApos_ATc$", colnames(count_mat))
+]
+stopifnot(length(keep_cols) == 6)
+
+count_mat_atc <- count_mat[, keep_cols, drop = FALSE]
+count_mat_atc <- count_mat_atc[rowSums(count_mat_atc) > 0, , drop = FALSE]
+
+# Build coldata from sample names
+samps_l <- tolower(keep_cols)
+
+replicate <- factor(sub("^(br[123]).*", "\\1", samps_l), levels = c("br1","br2","br3"))
+condition <- ifelse(grepl("sgrnaneg_atc$", samps_l), "sgRNAneg_ATc", "sgRNApos_ATc")
+condition <- factor(condition, levels = c("sgRNAneg_ATc", "sgRNApos_ATc"))
+
+coldata <- data.frame(replicate = replicate, condition = condition, row.names = keep_cols)
+print(table(coldata$replicate, coldata$condition))
+  
+# 5) Build DESeq2 object (pre-batch testing)
+dds <- DESeqDataSetFromMatrix(
+     countData = count_mat_atc,
+     colData   = coldata,
+     design    = ~ condition )
+
+dds <- DESeq(dds)
+
+res <- results(
+     dds,
+     contrast = c("condition", "sgRNApos_ATc", "sgRNAneg_ATc"))
+res <- lfcShrink(dds,
+                     coef = "condition_sgRNApos_ATc_vs_sgRNAneg_ATc",
+                     res = res,
+                     type = "apeglm")
+summary(res)
+```
+
+## Batch effect testing with limma/PCA plots
+
+Before using limma to look at batch, data has to be normalised.
+
+We can run look at batch with PCA before correcting.
+
+rlog counts can be used for data with fewer samples - this is a normalisation designed for plots and stabilises variance across high and low counts, so you can observe principle component differences (I.e., PCs).
+
+With limma for batch correction, we can feed the DESeq2 rlog (or VST if working with more samples) counts and account for batch with limma::removeBatchffect. This tool tool is used to model the PCA with batch effect accounted for and taken away. This can help decipher whether batch is affecting your data.
+
+You can also use limma voom - a tool converts counts to logCPM, which models mean-variance relationship, and is better designed for limma testing to generate a PCA. You can run this as a means of visualisation, and also continue with DESeq2 as the main differential expression model, but this can get confusing. So either run DESeq2 or limmavoom for batch testing and differential expression.
+
+It is important to note that these counts do not affect differential expression testing, as these are separate batches of code to DESeq2 and will not be fed into DESeq2. limma batch testing is for visualisation only, and batch can be fed into the DESeq2 model later if it is observed within the PCA's when limma is used. DO NOT FEED rLOG/logCPM COUNTS INTO DESEQ2!
+
+```{r}
+suppressPackageStartupMessages({
+  library(DESeq2)
+  library(limma)
+  library(ggplot2)
+  library(ggrepel)
+})
+
+# output directory
+outdir <- file.path("RNAseq_project", "BR3")
+if (!dir.exists(outdir)) dir.create(outdir, recursive = TRUE)
+
+# -------------------------
+# 1) Input raw counts
+# -------------------------
+counts <- CountsMatrix1
+
+# Put gene IDs into rownames if first column is Gene
+if (!is.null(colnames(counts)) && colnames(counts)[1] %in% c("Gene","gene","gene_id","X")) {
+  rownames(counts) <- make.unique(as.character(counts[[1]]))
+  counts[[1]] <- NULL
+}
+
+counts <- as.matrix(counts)
+storage.mode(counts) <- "numeric"
+counts <- round(counts)
+stopifnot(all(counts >= 0), all(abs(counts - round(counts)) < 1e-6, na.rm = TRUE))
+
+# -------------------------
+# 2) Keep only sgRNAneg_ATc and sgRNApos_ATc (all BRs)
+# -------------------------
+samples <- colnames(counts)
+samps_l <- tolower(samples)
+
+keep <- grepl("sgrnaneg_atc$", samps_l) | grepl("sgrnapos_atc$", samps_l)
+# If your names don't end with that, use looser patterns:
+# keep <- grepl("sgrnaneg.*atc", samps_l) | grepl("sgrnapos.*atc", samps_l)
+
+counts <- counts[, keep, drop = FALSE]
+stopifnot(ncol(counts) == 6)  # expecting 6 samples
+
+samples <- colnames(counts)
+samps_l <- tolower(samples)
+
+# replicate parsing: BR1/BR2/BR3
+replicate <- factor(toupper(sub("^((br)[0-9]+).*", "\\1", samps_l)),
+                    levels = c("BR1","BR2","BR3"))
+
+# two-level condition from names
+condition2 <- ifelse(grepl("sgrnaneg_atc", samps_l), "sgRNAneg_ATc", "sgRNApos_ATc")
+condition2 <- factor(condition2, levels = c("sgRNAneg_ATc", "sgRNApos_ATc"))
+
+coldata <- data.frame(
+  sample     = samples,
+  condition2 = condition2,
+  replicate  = replicate,
+  row.names  = samples
+)
+
+print(table(coldata$condition2, coldata$replicate))
+
+
+# 3) DESeq2 with rlog data
+
+dds <- DESeqDataSetFromMatrix(
+  countData = counts,
+  colData   = coldata,
+  design    = ~ replicate + condition2
+)
+
+# optional but common: drop all-zero genes (avoids issues)
+dds <- dds[rowSums(counts(dds)) > 0, ]
+
+# rlog can be slow; for >~30 samples I'd recommend vst. Here n=6 so rlog is fine.
+rld <- rlog(dds, blind = FALSE)
+E_rlog <- assay(rld)
+
+# 4) PCA helper (AI-generated tool)
+plot_pc12 <- function(expr_mat, meta, title) {
+  row_vars <- apply(expr_mat, 1, var, na.rm = TRUE)
+  expr_mat <- expr_mat[is.finite(row_vars) & row_vars > 0, , drop = FALSE]
+
+  pca <- prcomp(t(expr_mat), center = TRUE, scale. = FALSE)
+  pv <- (pca$sdev^2) / sum(pca$sdev^2) * 100
+
+  df <- data.frame(
+    PC1 = pca$x[,1],
+    PC2 = pca$x[,2],
+    sample     = rownames(pca$x),
+    condition2 = meta[rownames(pca$x), "condition2"],
+    replicate  = meta[rownames(pca$x), "replicate"],
+    check.names = FALSE
+  )
+
+  ggplot(df, aes(PC1, PC2, color = condition2, shape = replicate, label = sample)) +
+    geom_point(size = 3) +
+    geom_text_repel(size = 3, show.legend = FALSE, max.overlaps = Inf) +
+    theme_classic(base_size = 12) +
+    labs(
+      title = title,
+      x = sprintf("PC1 (%.1f%%)", pv[1]),
+      y = sprintf("PC2 (%.1f%%)", pv[2]),
+      color = "condition",
+      shape = "replicate"
+    )
+}
+
+# 5) PCA on rlog only
+
+p_raw <- plot_pc12(E_rlog, coldata, "PCA (DESeq2 rlog): PC1 vs PC2")
+
+# 6) PCA on rlog + removing batch effect (visualisation only)
+E_rm <- removeBatchEffect(
+  E_rlog,
+  batch  = coldata$replicate,
+  design = model.matrix(~ condition2, data = coldata)
+)
+
+p_rm <- plot_pc12(E_rm, coldata, "PCA (rlog, donor removed): PC1 vs PC2")
+
+print(p_raw)
+print(p_rm)
+
+# Save plots
+
+ggsave(file.path(outdir, "PCA_rlog_PC1_PC2.png"), plot = p_raw, width = 7, height = 5, dpi = 300)
+ggsave(file.path(outdir, "PCA_rlog_batchRemoved_PC1_PC2.png"), plot = p_rm, width = 7, height = 5, dpi = 300)
+
+```
+
+## DESeq2
+
+Now you have deciphered from the PCA whether or not batch plays a role, you can add replicate as a factor in the DESeq2 model through \~ replicate + condition and run the model on the original counts matrix (n my case, CountsMatrix1)"
+
+```{r}
+
+## Run DESeq2 (unshrunk + shrunk LFC)
+
+# Significance (pvalue/padj) comes from `results()`.
+# Shrinkage (`lfcShrink(..., type="apeglm")`) stabilises log2FC for ranking/reporting, but typically does not change padj, and is useful for downstream analysis (though once I looked at the data from both shrinking actually doesnt alter fold change much)
+
+# rebuild coldata from count_mat_atc to guarantee matching
+samples <- colnames(count_mat_atc)
+samps_l <- tolower(samples)
+
+replicate <- factor(sub("^(br[123]).*", "\\1", samps_l), levels = c("br1","br2","br3"))
+condition <- ifelse(grepl("sgrnaneg_atc$", samps_l), "sgRNAneg_ATc", "sgRNApos_ATc")
+condition <- factor(condition, levels = c("sgRNAneg_ATc", "sgRNApos_ATc"))
+
+coldata <- data.frame(
+  replicate = replicate,
+  condition = condition,
+  row.names = samples
+)
+
+# sanity
+stopifnot(all(rownames(coldata) == colnames(count_mat_atc)))
+colnames(coldata)
+
+
+dds_full <- DESeqDataSetFromMatrix(
+  countData = count_mat_atc,
+  colData   = coldata,
+  design    = ~ replicate + condition
+)
+
+dds_full <- DESeq(dds_full)
+
+# Unshrunk results
+res <- results(dds_full, contrast = c("condition", "sgRNApos_ATc", "sgRNAneg_ATc"))
+
+# Shrunk log2FC (apeglm)
+LFC <- lfcShrink(
+  dds_full,
+  coef = "condition_sgRNApos_ATc_vs_sgRNAneg_ATc",
+  res  = res,
+  type = "apeglm"
+)
+summary(res)
+```
+
+To look at significant genes (i.e., padj \< 0.05):
+
+```{sum(!is.na(res$padj) & res$padj < 0.05)}
+sum(!is.na(LFC$padj) & LFC$padj < 0.05)
+```
+
+To export res (DESeq2 table):
+
+```{r}
+
+# Export results tables; export both unshrunk and shrunk.
+
+prefix <- "sgRNApos_ATc_vs_sgRNAneg_ATc"
+
+# Unshrunk
+res_df <- as.data.frame(res)
+res_df$MSMEG <- rownames(res_df)
+res_df <- res_df[, c("MSMEG", setdiff(colnames(res_df), "MSMEG"))]
+write.csv(res_df, file.path(out_tables, paste0(prefix, "_DESeq2_unshrunk.csv")), row.names = FALSE)
+
+# Shrunk
+lfc_df <- as.data.frame(LFC)
+lfc_df$MSMEG <- rownames(lfc_df)
+lfc_df <- lfc_df[, c("MSMEG", setdiff(colnames(lfc_df), "MSMEG"))]
+write.csv(lfc_df, file.path(out_tables, paste0(prefix, "_DESeq2_apeglm_shrunk.csv")), row.names = FALSE)
+
+# Significant table (FDR < 0.05)
+sig_df <- lfc_df[!is.na(lfc_df$padj) & lfc_df$padj < 0.05, ]
+sig_df <- sig_df[order(sig_df$padj), ]
+write.csv(sig_df, file.path(out_tables, paste0(prefix, "_FDRsig_all.csv")), row.names = FALSE)
+
+nrow(sig_df)
+
+# Convert to data frame
+res_df <- data.frame(
++     gene_id = rownames(res),
++     as.data.frame(res),
++     row.names = NULL
+)
+
+# Keep standard DESeq2 columns
+res_df <- res_df[, c(
++     "gene_id",
++     "baseMean",
++     "log2FoldChange",
++     "lfcSE",
++     "stat",
++     "pvalue",
++     "padj"
+)]
+
+# Write CSV to correct folder
+write.csv(
++     res_df,
++     file = file.path(outdir, "DESeq2_BR3_sgRNAposATc_vs_sgRNAnegATc.csv"),
++     row.names = FALSE
+)
+sink(file.path(outdir, "DESeq2_BR3_summary.txt"))
+summary(res)
+```
+
+```{r}
+
+sig_genes <- rownames(res)[!is.na(res$padj) & res$padj < 0.05]
+length(sig_genes)
+
+plot_one_gene <- function(gene_id) {
+  tmp <- plotCounts(dds_full,
+                    gene = gene_id,
+                    intgroup = "condition",
+                    returnData = TRUE)
+
+  ggplot(tmp, aes(x = condition, y = count)) +
+    geom_boxplot(outlier.shape = NA) +
+    geom_dotplot(binaxis = "y", stackdir = "center", dotsize = 0.6) +
+    theme_classic(base_size = 12) +
+    labs(title = paste0(gene_id, " expression"),
+         x = "condition", y = "normalized count")
+}
+
+pdf(file.path(out_plots, paste0(prefix, "_plotCounts_FDRsig_all.pdf")),
+    width = 6, height = 4.5)
+for (g in sig_genes) print(plot_one_gene(g))
+dev.off()
+
+```
+
+## Plots
+
+```{r}
+suppressPackageStartupMessages({
+     library(DESeq2)
+     library(dplyr)
+     library(stringr)
+     library(ggplot2)
+     library(ggrepel)
+     library(pheatmap)
+     library(patchwork)
+})
+
+outdir <- file.path("RNAseq_project", "BR3", "plots")
+if (!dir.exists(outdir)) dir.create(outdir, recursive = TRUE)
+```
+
+The following code is for generating a pack of plots which may be useful for downstream work/presenting, including:
+
+-   MA plot
+
+-   p-value and padj histograms
+
+-   sample correlation and top gene heatmaps
+
+-   volcano (with + without target gene highlight)
+
+-   top up/down regulation tables
+
+-   genome scatter of significant DEGs
+
+-   top 20 up/down barplots
+
+```{r}
+## tidy DESeq2 results with MSMEG order - this was useful for me as my data would not organise sensibly
+
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(stringr)
+})
+
+as_tidy_res <- function(res) {
+  df <- as.data.frame(res)
+  df$gene_raw <- rownames(df)
+
+  df %>%
+    mutate(
+      gene_id = str_extract(gene_raw, "MSMEG_\\d+"),
+      genome_order = suppressWarnings(as.numeric(str_remove(gene_id, "MSMEG_"))),
+      neg_log10_padj = ifelse(!is.na(padj) & padj > 0, -log10(padj), NA_real_),
+      sig = !is.na(padj) & padj < 0.05
+    )
+}
+
+```
+
+### MA plot
+
+```{r}
+
+## MA plot (normalised counts v. log10pvalue)
+# alpha=0.05` colors  genes red by default.
+
+DESeq2::plotMA(res,
+               main = "sgRNApos_ATc vs sgRNAneg_ATc (BR1+BR2+BR3)",
+               ylim = c(-3, 3),
+               alpha = 0.05)
+
+```
+
+### P-value and padj histograms
+
+```{r}
+# p-value and FDR histograms
+# A big spike near 1 in `padj` is common when few genes are truly DE and after multiple-testing correction.
+
+hist(res$pvalue, breaks = 50, col = "grey",
+     main = "p-value distribution (sgRNApos_ATc vs sgRNAneg_ATc)",
+     xlab = "p-value")
+
+hist(res$padj, breaks = 50, col = "grey",
+     main = "Adjusted p-value (FDR) distribution",
+     xlab = "Adjusted p-value")
+
+```
+
+### Volcano plot
+
+```{r}
+suppressPackageStartupMessages({
+  library(ggplot2)
+})
+
+volcano_pvalue_highlight_fdr <- function(res, title,
+                                        p_cut = 0.05,
+                                        fdr_cut = 0.05,
+                                        ycap = 10) {
+
+  df <- as.data.frame(res)
+  df$gene <- rownames(df)
+
+  df <- df[is.finite(df$log2FoldChange) & is.finite(df$pvalue), ]
+
+  df$neglog10p <- -log10(df$pvalue)
+  df$fdr_sig   <- !is.na(df$padj) & df$padj < fdr_cut
+
+  ggplot(df, aes(x = log2FoldChange, y = pmin(neglog10p, ycap))) +
+    # all genes
+    geom_point(color = "grey70", size = 1.2, alpha = 0.8) +
+    # overlay FDR significant genes
+    geom_point(data = df[df$fdr_sig, ],
+               color = "red", size = 1.6, alpha = 0.9) +
+    # p-value cutoff line
+    geom_hline(yintercept = -log10(p_cut), linetype = "dashed", color = "green3") +
+    labs(title = title,
+         x = expression(log[2]~fold~change),
+         y = expression(-log[10]~pvalue)) +
+    theme_classic(base_size = 12)
+}
+
+p <- volcano_pvalue_highlight_fdr(res, "sgRNApos_ATc vs sgRNAneg_ATc")
+print(p)
+
+```
+
+### Top up/down regulated genes
+
+```{r}
+get_top_degs <- function(res, n = 20) {
+     df <- as.data.frame(res) %>%
+         mutate(gene = rownames(.)) %>%
+         filter(!is.na(padj)) %>%
+         arrange(padj)
+     
+     top_up   <- df %>% filter(log2FoldChange > 0) %>% head(n)
+     top_down <- df %>% filter(log2FoldChange < 0) %>% head(n)
+     
+     list(up = top_up, down = top_down)
+}
+top_degs <- get_top_degs(res, n = 20)
+top_degs$up
+top_degs$down
+
+```
+
+### Whole genome scatter graph (bit random but I like it as a visual)
+
+```{r}
+tidy_res <- as_tidy_res(res)   # use UNshrunk res
+
+
+genome_scatter <- function(df, title, padj_cutoff = 0.05) {
+     df_sig <- df %>% filter(!is.na(padj), padj < padj_cutoff, !is.na(genome_order), !is.na(neg_log10_padj))
+     target <- df_sig %>% filter(gene_id == "MSMEG_3117")
+     
+     ggplot(df_sig, aes(x = genome_order, y = log2FoldChange, colour = neg_log10_padj)) +
+         geom_hline(yintercept = 0, linetype = "dashed", colour = "grey70") +
+         geom_point(size = 1.6, alpha = 0.9) +
+         geom_point(data = target, colour = "black", fill = "white", size = 3.5, shape = 21, stroke = 1) +
+         geom_text_repel(
+             data = target,
+             aes(label = paste0(gene_id, "\nlog2FC = ", round(log2FoldChange, 2))),
+             size = 3.3,
+             nudge_y = 0.8,
+             box.padding = 0.4,
+             max.overlaps = Inf ) +
+         scale_colour_gradient(low = "yellow", high = "red", name = expression(-log[10]~"adj p")) +
+         labs(title = title, x = "Genome order (MSMEG number)", y = expression(log[2]~fold~change)) +
+         theme_bw(base_size = 12) +
+         theme(panel.grid.minor = element_blank())
+}
+p <- genome_scatter(
+  df    = tidy_res,
+  title = "Genome-wide DE (FDR < 0.05)"
+)
+
+print(p)
+
+```
+
+### Top DEG barplots
+
+```{r}
+plot_top_bar <- function(top_df, title) {
++     df <- top_df %>% mutate(gene = factor(gene, levels = rev(gene)))
++     
++     ggplot(df, aes(x = gene, y = log2FoldChange)) +
++         geom_col() +
++         coord_flip() +
++         labs(title = title, x = NULL, y = expression(log[2]~fold~change)) +
++         theme_classic(base_size = 12)}
+```
+
+### Heatmap
+
+```{r}
+
+
+sample_order <- c(
+  "BR1_sgRNAneg_ATc",
+  "BR2_sgRNAneg_ATc",
+  "BR3_sgRNAneg_ATc",
+  "BR1_sgRNApos_ATc",
+  "BR2_sgRNApos_ATc",
+  "BR3_sgRNApos_ATc"
+)
+
+stopifnot(all(sample_order %in% colnames(mat_rlog_rm)))
+
+mat_ord <- mat_rlog_rm[, sample_order, drop = FALSE]
+ann_ord <- coldata[sample_order, , drop = FALSE]
+
+
+sample_cor <- cor(mat_ord, method = "pearson", use = "pairwise.complete.obs")
+
+
+pheatmap::pheatmap(
+  sample_cor,
+  annotation_col = ann_ord,
+  annotation_row = ann_ord,
+  cluster_rows = FALSE,
+  cluster_cols = FALSE,
+  main = "Sample-to-sample correlation (rlog, batch removed)",
+  fontsize = 10
+)
+
+
+rv <- matrixStats::rowVars(mat_ord)
+rv <- rv[is.finite(rv)]
+
+# remove zero-variance genes just in case
+keep_genes <- names(rv)[rv > 0]
+mat_use <- mat_ord[keep_genes, , drop = FALSE]
+rv_use <- matrixStats::rowVars(mat_use)
+
+top500 <- names(sort(rv_use, decreasing = TRUE))[1:500]
+mat_top <- mat_use[top500, , drop = FALSE]
+
+# z-score per gene (row)
+mat_top_z <- t(scale(t(mat_top)))
+
+
+pheatmap::pheatmap(
+  mat_top_z,
+  annotation_col = ann_ord,
+  show_rownames = FALSE,
+  cluster_cols = FALSE,   # keeps your specified sample order
+  main = "Top 500 variable genes (rlog, batch removed)",
+  fontsize = 10
+)
+
+
+
+```
+
+```{r}
+plot_heatmap_top500 <- function(dds_obj, main_title, filename) {
++     rld <- rlog(dds_obj, blind = FALSE)
++     rlog_mat <- assay(rld)
++     
++     rv <- apply(rlog_mat, 1, var, na.rm = TRUE)
++     top500 <- order(rv, decreasing = TRUE)[1:min(500, length(rv))]
++     mat_top500 <- rlog_mat[top500, , drop = FALSE]
++     
++     mat_top500_z <- t(scale(t(mat_top500)))
++     
++     ann_col <- as.data.frame(colData(dds_obj)[, c("condition", "replicate")])
++     
++     png(file.path(outdir, filename), width = 1400, height = 1100, res = 200)
++     pheatmap(mat_top500_z,
++              annotation_col = ann_col,
++              show_rownames = FALSE,
++              cluster_rows = TRUE,
++              cluster_cols = TRUE,
++              main = main_title)
++     dev.off() }
+```
+
+### Summary output
+
+```{r}
+cat("  Total significant genes   :", sum(res$padj < 0.05, na.rm=TRUE), "\n")
+```
+
+## MSMEG-MTB homology
+
+As the Mycobacterial genomes are not fully annotated - M. smemgatis being the least annotated of all -, we can create a homology table with the orthologs of Mtb to better understand the genes within the dataset and link them to standardised functional categories.
+
+```{r}
+annot <- Mtb_Msm_ortholog_function_map
+
+# make key consistent with gene_id
+
+annot2 <- annot %>%
+    mutate(MSMEG = ifelse(grepl("^MSMEG_", MSMEG),
+                             MSMEG,
+                             paste0("MSMEG_", MSMEG)))
+
+res_c1_annot <- sgRNAposATc_vs_sgRNAnegATc_DESeq2 %>%
+    left_join(annot2, by = c("gene_id" = "MSMEG"))
+
+write.csv(
+         res_c1_annot,
+         file = file.path(outdir, "DESeq2_sgRNAposATc_vs_sgRNAnegATc_Mtb_annotated.csv"),
+         row.names = FALSE
+)
+```
+
+## Gene Enrichment
+
+[GoSeq](https://bioconductor.org/packages/release/bioc/html/goseq.html), developed by [Young et al. (2010)](https://genomebiology.biomedcentral.com/articles/10.1186/gb-2010-11-2-r14), tests for the enrichment of Gene Ontology terms. This is GOseq **enrichment** GOseq corrects for **gene length bias** and can be used with non-GO annotations, i.e., Mtb functional category annotations.
+
+```{r}
+
+
+## Build gene_length from annotation table (Start/Stop)
+
+# If annotation object is named differently, change mc2155_annotation
+stopifnot(exists("mc2155_annotation"))
+
+annot_cds <- mc2155_annotation[mc2155_annotation$Feature == "CDS", ]
+annot_cds$gene_length <- abs(annot_cds$Stop - annot_cds$Start) + 1
+
+gene_lengths <- annot_cds[, c("Locus", "gene_length")]
+colnames(gene_lengths) <- c("MSMEG", "gene_length")
+
+# Merge into res_annot_df if not already present
+if (!("gene_length" %in% colnames(res_annot_df) && any(res_annot_df$gene_length > 0, na.rm=TRUE))) {
+  res_annot_df <- merge(res_annot_df, gene_lengths, by = "MSMEG", all.x = TRUE)
+}
+
+sum(is.na(res_annot_df$gene_length))
+
+FDR <- 0.05
+cat_col <- "Mtb_Functional_Category"
+stopifnot(cat_col %in% colnames(res_annot_df))
+stopifnot("gene_length" %in% colnames(res_annot_df))
+
+# DE vectors
+de_up <- with(res_annot_df, !is.na(padj) & padj < FDR & log2FoldChange > 0)
+de_dn <- with(res_annot_df, !is.na(padj) & padj < FDR & log2FoldChange < 0)
+names(de_up) <- res_annot_df$MSMEG
+names(de_dn) <- res_annot_df$MSMEG
+
+# Bias vector
+bias <- res_annot_df$gene_length
+names(bias) <- res_annot_df$MSMEG
+
+# gene2cat mapping (drop NA categories)
+ok_cat <- !is.na(res_annot_df[[cat_col]]) & res_annot_df[[cat_col]] != ""
+gene2cat <- split(res_annot_df[[cat_col]][ok_cat], res_annot_df$MSMEG[ok_cat])
+
+# Universe: genes with both length and category
+universe <- intersect(names(bias)[!is.na(bias)], names(gene2cat))
+de_up_u <- de_up[universe]
+de_dn_u <- de_dn[universe]
+bias_u  <- bias[universe]
+gene2cat_u <- gene2cat[universe]
+
+# UP
+pwf_up <- nullp(de_up_u, bias.data = bias_u)
+gs_up <- goseq(pwf_up, gene2cat = gene2cat_u)
+gs_up$padj <- p.adjust(gs_up$over_represented_pvalue, method = "BH")
+gs_up <- gs_up[order(gs_up$padj), ]
+
+# DOWN
+pwf_dn <- nullp(de_dn_u, bias.data = bias_u)
+gs_dn <- goseq(pwf_dn, gene2cat = gene2cat_u)
+gs_dn$padj <- p.adjust(gs_dn$over_represented_pvalue, method = "BH")
+gs_dn <- gs_dn[order(gs_dn$padj), ]
+
+head(gs_up, 20)
+head(gs_dn, 20)
+
+write.csv(gs_up, file.path(out_goseq, paste0(prefix, "_GOseq_MtbFunctional_UP.csv")), row.names = FALSE)
+write.csv(gs_dn, file.path(out_goseq, paste0(prefix, "_GOseq_MtbFunctional_DOWN.csv")), row.names = FALSE)
+
+png(file.path(out_plots, paste0(prefix, "_GOseq_PWF_UP.png")), width = 900, height = 700, res = 150)
+plotPWF(pwf_up)
+dev.off()
+
+png(file.path(out_plots, paste0(prefix, "_GOseq_PWF_DOWN.png")), width = 900, height = 700, res = 150)
+plotPWF(pwf_dn)
+dev.off()
+
+
+```
